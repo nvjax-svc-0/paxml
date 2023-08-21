@@ -80,6 +80,30 @@ TaskRegistry.add_versioned_tfds_task(
     shuffle_buffer_size=None,
 )
 
+TaskRegistry.add_versioned_tfds_task(
+    'c4_lm_v301_gpt_2',
+    versions=['3.1.0'],
+    pinned_version='3.1.0',
+    tfds_name='c4/en',
+    tfds_data_dir=None,
+    preprocessors=[
+        functools.partial(
+            t5_preprocessors.rekey,
+            key_map={
+                'inputs': None,
+                'targets': 'text',
+            }),
+        seqio.preprocessors.tokenize,
+        t5_preprocessors.reduce_concat_tokens,
+        t5_preprocessors.split_tokens_to_targets_length,
+        seqio.preprocessors.append_eos_after_trim,
+    ],
+    output_features=GPT_OUTPUT_FEATURES_LM,
+    metric_fns=[],
+    shuffle_buffer_size=100000,
+  )
+
+
 BOOLQ_OUTPUT_FEATURES = {
     'inputs': seqio.Feature(vocabulary=vocab, add_eos=False),
     'targets': seqio.Feature(vocabulary=vocab, add_eos=False),
@@ -115,16 +139,16 @@ TaskRegistry.add_versioned_tfds_task(
     shuffle_buffer_size=100000,
 )
 
-class PileUnsupervisedDataset(base_experiment.BaseExperiment):
+class GPTUnsupervisedDataset(base_experiment.BaseExperiment):
   """Used for training Baseline ULM."""
 
   PERCORE_BATCH_SIZE = 1
   MAX_SEQ_LEN = 2048
   TRAIN_INPUT_RANDOM_SEED = None
+  DATASET = "Pile" ## one of "Pile" or C4
+  LAMBADA_EVAL = False ## whether to evaluate on the lamabada dataset
 
-  def _dataset_common(
-      self, is_training
-  ) -> pax_fiddle.Config[base_input.BaseInput]:
+  def set_bs_and_hosts(self):
     num_local_devices = jax.local_device_count()
     if self.PERCORE_BATCH_SIZE >= 1:
       batch_size_per_process = int(self.PERCORE_BATCH_SIZE * num_local_devices)
@@ -133,39 +157,115 @@ class PileUnsupervisedDataset(base_experiment.BaseExperiment):
       global_batch_size = int(
           self.PERCORE_BATCH_SIZE * num_local_devices * jax.process_count()
       )
-      batch_size_per_process = math.ceil(
-          self.PERCORE_BATCH_SIZE * num_local_devices
-      )
+      # batch_size_per_process = num_local_devices
+      batch_size_per_process = int(self.PERCORE_BATCH_SIZE * num_local_devices)
       num_infeed_hosts = global_batch_size // batch_size_per_process
+    return batch_size_per_process, num_infeed_hosts
+
+  def _dataset_train(
+      self
+  ) -> pax_fiddle.Config[base_input.BaseInput]:
+
+    batch_size_per_process, num_infeed_hosts = self.set_bs_and_hosts()
+
+    if self.DATASET == "Pile":
+      name = 'PileTrain'
+      mixture_name = 'the_pile_lm'
+    elif self.DATASET == "C4":
+      name = 'C4Train'
+      mixture_name = 'c4_lm_v301_gpt_2'
+    else:
+      raise ValueError(f"Unsupported dataset {self.DATASET}. Please use either 'Pile' or 'C4'.")
 
     p = pax_fiddle.Config(
         seqio_input.SeqIOInput,
-        name='PileTrain' if is_training else 'PileValidation',
-        mixture_name='the_pile_lm',
-        split_name='train' if is_training else 'validation',
+        name='C4Train',
+        mixture_name='c4_lm_v301_gpt_2',
+        split_name='train',
         task_feature_lengths={'targets': self.MAX_SEQ_LEN},
         use_cached=False,
-        repeat=True if is_training else False,
+        repeat=True,
         feature_converter=seqio_input.LanguageModelFeatures(
-            pack=(self.PACKED_INPUT if is_training else False),
+            pack=(self.PACKED_INPUT),
             use_custom_packing_ops=False,
         ),
-        is_training=is_training,
+        is_training=True,
         input_random_seed=(
-            self.TRAIN_INPUT_RANDOM_SEED if is_training else 4321
+            self.TRAIN_INPUT_RANDOM_SEED
         ),
         batch_size=batch_size_per_process,
         num_infeed_hosts=num_infeed_hosts,
-        reset_for_eval=False if is_training else True,
+        reset_for_eval=False,
         shuffle=True,
+    )
+    return p
+
+  def _dataset_eval(
+      self
+  ) -> pax_fiddle.Config[base_input.BaseInput]:
+
+    batch_size_per_process, num_infeed_hosts = self.set_bs_and_hosts()
+
+    if self.LAMBADA_EVAL:
+      name = 'LambadaValidation'
+      mixture_name = 'lambada_eval'
+      split_name = 'test'
+      task_feature_lengths = {'targets': 64, 'inputs': self.MAX_SEQ_LEN - 64}
+      feature_converter = seqio_input.LanguageModelFeatures(
+            pack=False,
+            use_custom_packing_ops=False,
+            weights_on_targets_only=True,
+      )
+    elif self.DATASET == "Pile":
+      name = 'PileValidation'
+      mixture_name = 'the_pile_lm'
+      split_name = 'validation'
+      task_feature_lengths = {'targets': self.MAX_SEQ_LEN - 64}
+      feature_converter = seqio_input.LanguageModelFeatures(
+            pack=False,
+            use_custom_packing_ops=False,
+      )
+    elif self.DATASET == "C4":
+      name = 'C4Validation'
+      mixture_name = 'c4_lm_v301_gpt_2'
+      split_name = 'validation'
+      task_feature_lengths = {'targets': self.MAX_SEQ_LEN - 64}
+      feature_converter = seqio_input.LanguageModelFeatures(
+            pack=False,
+            use_custom_packing_ops=False,
+      ) 
+    else:
+      raise ValueError(f"Unsupported dataset {self.DATASET}. Please use either 'Pile' or 'C4'.")
+
+    p = pax_fiddle.Config(
+        seqio_input.SeqIOInput,
+        name='LambadaValidation',
+        mixture_name='lambada_eval',
+        split_name='test',
+        ## 'targets' is only one word
+        task_feature_lengths={'targets': 64, 'inputs': self.MAX_SEQ_LEN - 64},
+        use_cached=False,
+        repeat=False,
+        feature_converter=seqio_input.LanguageModelFeatures(
+            pack=False,
+            use_custom_packing_ops=False,
+            weights_on_targets_only=True,
+        ),
+        is_training=False,
+        input_random_seed=4321,
+        batch_size=batch_size_per_process,
+        num_infeed_hosts=num_infeed_hosts,
+        reset_for_eval=True,
+        shuffle=False,
+        eval_loop_num_batches=-1,
     )
     return p
 
   def datasets(self) -> list[pax_fiddle.Config[base_input.BaseInput]]:
     """Returns a list of dataset parameters."""
     return [
-        self._dataset_common(is_training=True),
-        self._dataset_common(is_training=False),
+        self._dataset_train(),
+        self._dataset_eval(),
     ]
 
 

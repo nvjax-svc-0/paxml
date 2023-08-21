@@ -26,10 +26,11 @@ from paxml.contrib.gpu.scripts_gpu.llama_utils import BaseLLaMA
 from paxml.contrib.gpu.scripts_gpu.lora_utils import LoRAMixin
 from paxml.contrib.gpu.scripts_gpu.tasks import BoolQDataset
 from paxml.contrib.gpu.scripts_gpu.tasks import LambadaDataset
-from paxml.contrib.gpu.scripts_gpu.tasks import PileUnsupervisedDataset
+from paxml.contrib.gpu.scripts_gpu.tasks import GPTUnsupervisedDataset
 from paxml.tasks.lm.model_params import maybe_setup_moe_params
 from paxml.tasks.lm.params.c4 import TransformerLmSpmdAdam
 from paxml.tasks.lm.params.lm_cloud import SyntheticDataset
+from paxml.tasks.lm.params.c4 import TransformerLmSpmdPipelineAdam
 from praxis import base_layer
 from praxis import layers
 from praxis import optimizers
@@ -222,7 +223,7 @@ class GPT5BBase(GPT126MBase):
     model_p = task_p.model
     stacked_p = model_p.lm_tpl.stacked_transformer_tpl
     if issubclass(
-        fdl.get_callable(stacked_p), transformers.StackedTransformerRepeated
+      fdl.get_callable(stacked_p), transformers.StackedTransformerRepeated
     ):
       stacked_p = stacked_p.block
 
@@ -281,6 +282,201 @@ class GPT175BBase(GPT126MBase):
   DCN_MESH_SHAPE = [1, 32, 1]
   PERCORE_BATCH_SIZE = 6
 
+  NUM_LOSSES_TO_AVERAGE = 5
+
+
+############# pipeline parallel configs ###############
+class GPT126MPP(TransformerLmSpmdPipelineAdam):
+
+  MODEL_CLASS = CustomMetricsLM
+
+  USE_REPEATED_LAYER = False
+  
+  ICI_MESH_SHAPE = [4,2,1,1]
+  DCN_MESH_SHAPE = [1,1,1,1]
+  NUM_STAGES = 4
+  PERCORE_BATCH_SIZE = 4
+  MICROBATCH_SIZE = 8
+  
+  MAX_STEPS = 600000
+  
+  MAX_SEQ_LEN = 2048
+  VOCAB_SIZE = 50304
+  PACKED_INPUT = False ## disable packed input for TE
+  
+  NUM_LAYERS = 12
+  NUM_HEADS = 12
+  MODEL_DIMS = 768
+  HIDDEN_DIMS = 3072
+  DIMS_PER_HEAD = 64
+
+  TRAINABLE_POSITION_EMB = True
+  TRAINABLE_PE_MAX_SEQ_LEN = MAX_SEQ_LEN
+  
+  USE_BIAS = True
+  LAYERNORM_EPSILON = 1e-5
+  ATTEN_LOGIT_CAP = -1.0
+  INIT_STD = 0.023
+  SOFTMAX_INIT_STD = 0.023
+  ACTIVATION_CLS = layers.GELU
+    
+  ## optimizer-related
+  ADAM_BETA1 = 0.9
+  ADAM_BETA2 = 0.95
+  LEARNING_RATE = 6e-4
+  ADAM_EPSILON_ROOT = 0.0
+  ADAM_EPSILON = 1e-8
+  WEIGHT_DECAY = 0.1
+  ADAM_CLIP_THRESHOLD = -1.0
+  CLIP_GRADIENT_NORM_TO_VALUE = 1.0
+
+  ## lr schedule
+  LR_SCHEDULE = 'linear_rampup_cosine_decay'
+  LR_COS_WARMUP = 636
+  LR_COS_DECAY_START = LR_COS_WARMUP+1
+  LR_COS_DECAY_END = 500000
+  R_COS_MIN_RATIO = 0.1
+  LR_COS_MAX = 1.0
+
+  NUM_LOSSES_TO_AVERAGE = 10
+
+  def task(self):
+    task_p = super().task()
+    task_p = configure_gpt3_task(self, task_p)
+
+    task_p.train.num_train_steps = self.MAX_STEPS
+    task_p.train.num_losses_to_average = self.NUM_LOSSES_TO_AVERAGE
+
+    model_p = task_p.model
+    
+    ### compute layernorm reductions in fp32. Needed for stable training on GPUs
+    stacked_p = model_p.lm_tpl.stacked_transformer_tpl
+    if stacked_p.cls == layers.PipelinedTransformer:
+      stacked_p = stacked_p.pipeline_stage
+    if issubclass(stacked_p.cls, layers.StackedTransformerRepeated):
+      stacked_p = stacked_p.block
+    transformer_layer_p = stacked_p.transformer_layer_params_tpl
+    transformer_layer_p.ln_tpl.reductions_in_fp32 = True
+    transformer_layer_p.tr_fflayer_tpl.ln_tpl.reductions_in_fp32 = True
+    task_p.model.lm_tpl.final_ln_tpl.reductions_in_fp32 = True
+    
+    model_p.params_init = WeightInit.Gaussian(self.INIT_STD)
+    softmax_init = WeightInit.Gaussian(self.SOFTMAX_INIT_STD)
+    model_p.lm_tpl.softmax_tpl.params_init = softmax_init
+    
+    model_p.apply_eval_sample_weights = True
+    
+    return task_p
+
+@experiment_registry.register
+class Pile126MPP(GPT126MPP, GPTUnsupervisedDataset):
+
+  def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
+    task_p = super().task()
+    return task_p
+
+@experiment_registry.register
+class GPT5BPP(Pile126MPP):
+
+  USE_REPEATED_LAYER = False
+  ICI_MESH_SHAPE = [2, 2, 1, 2]
+  DCN_MESH_SHAPE = [2, 1, 1, 1]
+  #CHECKPOINT_POLICY = layers.AutodiffCheckpointType.SAVE_DOT_WITH_NO_BATCH_DIM
+  MAX_STEPS = 75000
+
+  PERCORE_BATCH_SIZE = 8
+
+  NUM_LAYERS = 24
+  NUM_HEADS = 32
+  MODEL_DIMS = 4096
+  HIDDEN_DIMS = 16384
+  DIMS_PER_HEAD = 128
+
+  INIT_STD = 0.01
+  SOFTMAX_INIT_STD = 0.01
+
+  ## optimizer-related
+  LEARNING_RATE = 1.6e-4
+
+  ## lr schedule
+  LR_COS_WARMUP = 115
+  LR_COS_DECAY_START = LR_COS_WARMUP+1
+  LR_COS_DECAY_END = 62500
+
+  CHECKPOINT_EVERY_N_STEPS = 250
+  SUMMARY_INTERVAL_STEPS = 10
+
+  def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
+    task_p = super().task()
+
+    model_p = task_p.model
+    stacked_p = model_p.lm_tpl.stacked_transformer_tpl
+    if stacked_p.cls == layers.PipelinedTransformer:
+      stacked_p = stacked_p.pipeline_stage
+    if issubclass(stacked_p.cls, layers.StackedTransformerRepeated):
+      stacked_p = stacked_p.block
+
+    stacked_p.input_dropout_prob = 0.1
+    stacked_p.residual_dropout_prob = 0.1
+    stacked_p.atten_dropout_prob = 0.1
+    return task_p
+
+
+@experiment_registry.register
+class GPT175BPP(GPT126MPP, GPTUnsupervisedDataset):
+
+  NUM_LAYERS = 96
+  NUM_HEADS = 96
+  MODEL_DIMS = 12288
+  # Known as MLP_DIM in t5x
+  HIDDEN_DIMS = MODEL_DIMS * 4
+  # Defaults to MODEL_DIMS // NUM_HEADS.
+  DIMS_PER_HEAD = 128
+  # Known as NUM_EMBEDDINGS in t5x
+  VOCAB_SIZE = 50257
+  USE_REPEATED_LAYER = False
+  MAX_STEPS = 75000
+
+  # Model configs
+  ACTIVATION_CLS = layers.GELU
+  USE_GATED_ACTIVATION = False
+  SEPARATE_EMBEDDING = False
+  TRAINABLE_POSITION_EMB = True
+  ATTEN_LOGIT_CAP = -1.0  # Disable logits cap in atten
+
+  # HPs
+  WEIGHT_DECAY = 0.1
+  ADAM_BETA1 = 0.9
+  ADAM_BETA2 = 0.95
+  ADAM_EPSILON = 1e-8
+  ADAM_CLIP_THRESHOLD = -1.0  # Disable Adam clip_threshold
+  CLIP_GRADIENT_NORM_TO_VALUE = 1.0
+  LAYERNORM_EPSILON = 1e-5
+
+  # In units of steps for BS1.5k
+  LEARNING_RATE = 2e-5
+  LR_SCHEDULE = 'linear_rampup_cosine_decay'
+  LR_COS_WARMUP = 265
+  LR_COS_DECAY_START = LR_COS_WARMUP + 1
+  LR_COS_DECAY_END = 108600
+  LR_COS_MAX = 1.0
+  LR_COS_MIN_RATIO = 0.1
+
+  # Checkpoint
+  EVAL_INTERVAL_STEPS = 100
+  SUMMARY_INTERVAL_STEPS = 10
+  CHECKPOINT_EVERY_N_STEPS = 100
+  CHECKPOINT_MAX_TO_KEEP = 10
+
+  ## GPU-specific settings
+  ICI_MESH_SHAPE = [2,1,1,4]
+  DCN_MESH_SHAPE = [8,1,1,1]
+  NUM_STAGES = 16
+  PERCORE_BATCH_SIZE = 2
+  MICROBATCH_SIZE = 1
+
+  NUM_LOSSES_TO_AVERAGE = 5
+
   def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
     task_p = super().task()
     return task_p
@@ -319,26 +515,32 @@ class Synthetic175B(GPT175BBase, SyntheticDataset):
 
 ### configs with the Pile dataset
 @experiment_registry.register
-class Pile126M(GPT126MBase, PileUnsupervisedDataset):
+class Pile126M(GPT126MBase, GPTUnsupervisedDataset):
 
   def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
     task_p = super().task()
+    if self.LAMBADA_EVAL:
+      task_p.model.eval_task = 'lambada'
     return task_p
 
 
 @experiment_registry.register
-class Pile5B(GPT5BBase, PileUnsupervisedDataset):
+class Pile5B(GPT5BBase, GPTUnsupervisedDataset):
 
   def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
     task_p = super().task()
+    if self.LAMBADA_EVAL:
+      task_p.model.eval_task = 'lambada'
     return task_p
 
 
 @experiment_registry.register
-class Pile175B(GPT175BBase, PileUnsupervisedDataset):
+class Pile175B(GPT175BBase, GPTUnsupervisedDataset):
 
   def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
     task_p = super().task()
+    if self.LAMBADA_EVAL:
+      task_p.model.eval_task = 'lambada'
     return task_p
 
 
@@ -555,14 +757,14 @@ class GLaM64B64EBase(GLaM126M64EBase):
     return task_p
 
 
-class PileGLaM126M64E(GLaM126M64EBase, PileUnsupervisedDataset):
+class PileGLaM126M64E(GLaM126M64EBase, GPTUnsupervisedDataset):
 
   def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
     task_p = super().task()
     return task_p
 
 
-class PileGLaM64B64E(GLaM64B64EBase, PileUnsupervisedDataset):
+class PileGLaM64B64E(GLaM64B64EBase, GPTUnsupervisedDataset):
 
   def task(self) -> pax_fiddle.Config[tasks_lib.SingleTask]:
     task_p = super().task()
