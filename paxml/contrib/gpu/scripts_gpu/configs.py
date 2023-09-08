@@ -160,6 +160,7 @@ class GPT126MBase(TransformerLmSpmdAdam):
     task_p.train.compute_steps_per_sec_interval_steps = (
         self.SUMMARY_INTERVAL_STEPS
     )
+    task_p.train.num_losses_to_average = 10
 
     model_p = task_p.model
 

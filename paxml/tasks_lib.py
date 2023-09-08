@@ -1279,6 +1279,7 @@ class SingleTask(base_task.BaseTask):
         loading the checkpoint.
       report_progress_hook: Whether to use clu's ReportProgress hook to report
         the progress of the experiment.
+      num_losses_to_average: An optional integer indicating the number of steps over which to average when logging final loss.
     """
 
     learner: pax_fiddle.Config[learners_lib.Learner] = (
@@ -1323,6 +1324,7 @@ class SingleTask(base_task.BaseTask):
     external_checkpoint_path: epath.Path | None = None
     external_checkpoint_handler: ocp.CheckpointHandler | None = None
     report_progress_hook: bool = False
+    num_losses_to_average: int | None = None
 
   TrainHParams = base_hyperparams.FiddleHParamsClassStub(Train)  # pylint: disable=invalid-name
 

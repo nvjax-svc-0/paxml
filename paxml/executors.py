@@ -23,6 +23,7 @@ from typing import Any, Sequence
 from absl import logging
 from etils import epath
 import jax
+import numpy as np
 from paxml import base_executor
 from paxml import base_metrics
 from paxml import decode_programs as decode_programs_lib
@@ -409,6 +410,10 @@ def _train_loop(
     step_i,
     train_p,
 ):
+
+  num_losses_to_average = task.train.num_losses_to_average
+  last_n_losses = [] if num_losses_to_average else None
+
   while True:
     logging.log_first_n(INFO, '[PAX STATUS]: Beginning step `%d`.', 5, step_i)
     checkpointer.save_if_needed(
@@ -433,12 +438,19 @@ def _train_loop(
           step_i,
           train_p.num_train_steps,
       )
+
+      logging.warning(f'Average loss for last {len(last_n_losses)} steps: {np.mean(last_n_losses)}')
       break
     with ml_monitoring.ml_event_logger(ml_monitoring.MlEvent.TRAIN_STEP):
       partitioned_train_state = train_program.update_state(
           partitioned_train_state, step_i
       )
       program_output = train_program.run(partitioned_train_state, step_i)
+
+      loss = program_output.loss
+      last_n_losses.append(loss)
+      if num_losses_to_average and len(last_n_losses) > num_losses_to_average:
+          last_n_losses = last_n_losses[-num_losses_to_average:]
 
     partitioned_train_state = program_output.state
     train_weighted_scalars = program_output.weighted_scalars
