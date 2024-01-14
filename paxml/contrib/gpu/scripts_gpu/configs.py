@@ -74,6 +74,8 @@ def configure_gpt3_task(
       fdl.get_callable(stacked_p), transformers.StackedTransformerRepeated
   ):
     stacked_p = stacked_p.block
+  stacked_p.checkpoint_policy = cls.CHECKPOINT_POLICY
+  stacked_p.remat = cls.USE_REPEATED_LAYER
   transformer_layer_p = stacked_p.transformer_layer_params_tpl
 
   transformer_layer_p.ln_tpl.epsilon = cls.LAYERNORM_EPSILON
