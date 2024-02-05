@@ -90,6 +90,10 @@ _VALUES_TO_SUMMARY_TYPE = {
     clu_values.Audio: SummaryType.AUDIO,
 }
 
+def set_task_status(msg: str):
+    """Sets the status string for this task."""
+    logging.warning("Setting task status: %s", msg)
+
 
 def _get_summary_type(
     metric_value: SummaryValueTypes,
@@ -619,7 +623,7 @@ def write_summary_entry(
 
     compute_and_write_clu_metric_summaries(clu_metrics, step_i)
 
-    work_unit.set_task_status(status_msg)
+    set_task_status(status_msg)
     summaries = flatten_summary_dict(summary_tensors)
     for key, tensors in summaries:
       summary_type = base_layer.get_summary_type_from_key(key)
