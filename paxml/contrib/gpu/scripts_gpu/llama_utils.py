@@ -72,6 +72,7 @@ class BaseLLaMA(TransformerLmSpmdAdam):
     task_p = super().task()
 
     task_p.train.num_train_steps = self.MAX_STEPS
+    task_p.train.num_losses_to_average = 10
 
     model_p = task_p.model
 
