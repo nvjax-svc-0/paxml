@@ -14,6 +14,8 @@
 # limitations under the License.
 
 from abc import ABC
+
+from absl import logging
 import fiddle as fdl
 
 from paxml import tasks_lib
@@ -26,6 +28,7 @@ from praxis.contrib.gpu.scripts_gpu.lora_layers import (
     LoraCombinedQKVProjection,
     LoraLinear,
 )
+
 
 class LoRAMixin(ABC):
     USE_LORA = False
@@ -69,6 +72,7 @@ class LoRAMixin(ABC):
             ff_templ.linear_tpl.copy_fields_from(original_linear_p)
 
         if self.LORA_TARGET_LAYERS in ["all", "attention"]:
+            lora_applied = False
             if hasattr(stacked_p.tr_atten_tpl, "combined_qkv_proj_tpl"):
                 original_combined_qkv_p = stacked_p.tr_atten_tpl.combined_qkv_proj_tpl
                 stacked_p.tr_atten_tpl.combined_qkv_proj_tpl = pax_fiddle.Config(
@@ -79,13 +83,22 @@ class LoRAMixin(ABC):
                 stacked_p.tr_atten_tpl.combined_qkv_proj_tpl.copy_fields_from(
                     original_combined_qkv_p
                 )
+                lora_applied = True
 
-            original_proj_p = stacked_p.tr_atten_tpl.proj_tpl
-            stacked_p.tr_atten_tpl.proj_tpl = pax_fiddle.Config(
-                LoraAttentionProjection,
-                name="lora_attention_projection",
-                rank=self.LORA_RANK,
-            )
-            stacked_p.tr_atten_tpl.proj_tpl.copy_fields_from(original_proj_p)
+            if hasattr(stacked_p.tr_atten_tpl, "proj_tpl"):
+                original_proj_p = stacked_p.tr_atten_tpl.proj_tpl
+                stacked_p.tr_atten_tpl.proj_tpl = pax_fiddle.Config(
+                    LoraAttentionProjection,
+                    name="lora_attention_projection",
+                    rank=self.LORA_RANK,
+                )
+                stacked_p.tr_atten_tpl.proj_tpl.copy_fields_from(original_proj_p)
+                lora_applied = True
+
+            if not lora_applied:
+                logging.warning(
+                    f"proj_tpl or combined_qkv_proj_tpl not found on tr_atten_tpl {stacked_p.tr_atten_tpl}."
+                    "As a result, LoRA will not be applied on the Attention layers."
+                )
 
         return task_p
