@@ -930,6 +930,8 @@ class Grok_Proxy(NVIDIA1_3B):
       transformer_layer_p.tr_atten_tpl.use_rotary_position_emb = True
       task_p.model.lm_tpl.position_emb_tpl = None
 
+    task_p.train.num_losses_to_average = 10
+
     return task_p
 
 
