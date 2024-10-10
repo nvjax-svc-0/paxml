@@ -179,8 +179,8 @@ class GPTUnsupervisedDataset(base_experiment.BaseExperiment):
 
     p = pax_fiddle.Config(
         seqio_input.SeqIOInput,
-        name='C4Train',
-        mixture_name='c4_lm_v301_gpt_2',
+        name=name,
+        mixture_name=mixture_name,
         split_name='train',
         task_feature_lengths={'targets': self.MAX_SEQ_LEN},
         use_cached=False,
