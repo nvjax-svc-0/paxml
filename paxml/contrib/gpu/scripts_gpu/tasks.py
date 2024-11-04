@@ -268,6 +268,8 @@ class GPTUnsupervisedDataset(base_experiment.BaseExperiment):
         self._dataset_eval(),
     ]
 
+## for backward compatibility
+PileUnsupervisedDataset = GPTUnsupervisedDataset
 
 class LambadaDataset(base_experiment.BaseExperiment):
   """Used for zero-shot eval."""
