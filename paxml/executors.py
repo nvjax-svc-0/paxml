@@ -448,8 +448,9 @@ def _train_loop(
       program_output = train_program.run(partitioned_train_state, step_i)
 
       loss = program_output.loss
-      last_n_losses.append(loss)
-      if num_losses_to_average and len(last_n_losses) > num_losses_to_average:
+      if num_losses_to_average:
+        last_n_losses.append(loss)
+        if len(last_n_losses) > num_losses_to_average:
           last_n_losses = last_n_losses[-num_losses_to_average:]
 
     partitioned_train_state = program_output.state
